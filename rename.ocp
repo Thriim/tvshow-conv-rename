@@ -1,0 +1,3 @@
+begin program "tvshow-rename"
+    files = [ "rename.ml" ]
+end
