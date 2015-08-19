@@ -25,6 +25,8 @@ type metadata = {
   encoder: string option;
 }
 
+module Term = ANSITerminal
+
 let print_ep fmt = function
     E i -> Format.fprintf fmt "E%02d" i
   | Especial n  -> Format.fprintf fmt ".%s" n
@@ -73,23 +75,35 @@ let print_meta fmt meta =
 
 (** Reading from user inputs *)
 
+(* From stackoverflow *)
+let get1char () =
+  let termio = Unix.tcgetattr Unix.stdin in
+  let () =
+    Unix.tcsetattr Unix.stdin Unix.TCSADRAIN
+      { termio with Unix.c_icanon = false } in
+  let res = input_char stdin in
+  Unix.tcsetattr Unix.stdin Unix.TCSADRAIN termio;
+  res
+
 let read_enc fmt =
   let rec read () =
-    match read_int () with
-      0 -> X264
-    | 1 -> X265
-    | 2 -> DivX
-    | 3 -> Xvid
+    match get1char () with
+      '0' -> X264
+    | '1' -> X265
+    | '2' -> DivX
+    | '3' -> Xvid
     | opt ->
       Format.fprintf fmt
-        "\n%d is incorrect. Please choose a correct option: %!" opt;
+        "\n%c is incorrect. Please choose a correct option: %!" opt;
       read () in
-  Format.fprintf fmt "Please choose the encoding:\n\
+  Format.fprintf fmt "%s\
                       0) X264\n\
                       1) X265\n\
                       2) DivX\n\
                       3) Xvid\n\
-                      > %!";
+                      > %!"
+    @@ Term.sprintf [Term.Bold] "Please choose the encoding:\n%!"
+  ;
   let res = read () in
   Format.fprintf fmt "\nChosen encoding: %a\n%!" print_encoding res;
   res
@@ -97,42 +111,44 @@ let read_enc fmt =
 
 let read_src fmt =
   let rec read () =
-    match read_int () with
-      0 -> HDTV
-    | 1 -> BluRay
-    | 2 -> DVD
+    match get1char () with
+      '0' -> HDTV
+    | '1' -> BluRay
+    | '2' -> DVD
     | opt ->
       Format.fprintf fmt
-        "\n%d is incorrect. Please choose a correct option: %!" opt;
+        "\n%c is incorrect. Please choose a correct option: %!" opt;
       read () in
-  Format.fprintf fmt "Please choose the source:\n\
+  Format.fprintf fmt "%s\
                       0) HDTV\n\
                       1) BluRay\n\
                       2) DVD\n\
-                      > %!";
+                      > %!"
+  @@ Term.sprintf [Term.Bold] "Please choose the source:\n%!";
   let res = read () in
   Format.fprintf fmt "\nChosen source: %a\n%!" print_source res;
   res
 
 let read_quality fmt =
   let rec read () =
-    match read_int () with
-      0 -> QStd
-    | 1 -> Q480
-    | 2 -> Q720
-    | 3 -> Q1080
+    match get1char () with
+      '0' -> QStd
+    | '1' -> Q480
+    | '2' -> Q720
+    | '3' -> Q1080
     | opt ->
       Format.fprintf fmt
-        "\n%d is incorrect. Please choose a correct option: %!" opt;
+        "\n%c is incorrect. Please choose a correct option: %!" opt;
       read () in
-  Format.fprintf fmt "Please choose the quality:\n\
+  Format.fprintf fmt "%s\
                       0) SD\n\
                       1) 480p\n\
                       2) 720p\n\
                       3) 1080p\n\
-                      > %!";
+                      > %!"
+  @@ Term.sprintf [Term.Bold] "Please choose the quality:\n%!";
   let res = read () in
-  Format.fprintf fmt "Chosen quality: %a\n\n%!" print_quality res;
+  Format.fprintf fmt "\nChosen quality: %a\n%!" print_quality res;
   res
 
 let read_season fmt =
@@ -196,15 +212,20 @@ let generate_init_meta ?(season=1) fmt =
 let curr_season meta =
   fst meta.episode
 
+type keep = Use | Regenerate | Keep
+
 let keep fmt meta =
   let rec read () =
-    match read_line () with
-      "y" -> meta, true
-    | "n" -> regenerate_meta fmt meta, false
-    | s -> Format.fprintf fmt "Incorrect option\"%s\". Keep? [y/n]%!" s;
+    match get1char () with
+      'y' -> Use, meta
+    | 'n' -> Regenerate, regenerate_meta fmt meta
+    | 's' -> Keep, meta
+    | s -> Format.fprintf fmt "\nIncorrect option \"%c\". Keep? [y/n/(s)kip]%!" s;
       read ()
   in
-  read ()
+  let res = read () in
+  Format.fprintf fmt "\n%!";
+  res
 
 let next fmt meta fname =
   Format.fprintf fmt "File to rename: %s\n%!" fname;
@@ -212,10 +233,10 @@ let next fmt meta fname =
     _, Especial _ | Sspecial _, _ ->
     Format.fprintf fmt "Previous file was a special one, cannot generate the \
                         correct metadata\n%!";
-    generate_meta fmt, false
+    Regenerate, regenerate_meta fmt meta
   | s, E i ->
     let next_meta = { meta with episode = s, E (i + 1) } in
-    Format.fprintf fmt "Resulting file name: %a\nKeep and rename? [y/n]%!"
+    Format.fprintf fmt "Resulting file name: %a\nKeep and rename? [y/n/(s)kip]%!"
       print_meta next_meta;
     keep fmt next_meta
   | _,_ -> assert false
@@ -236,17 +257,19 @@ let rename_file f meta =
 
 
 let rename fmt meta fname =
-  let next_meta, ok = next fmt meta fname in
-  if ok then (rename_file fname next_meta; next_meta)
-  else
+  let op, next_meta = next fmt meta fname in
+  match op with
+    Use -> (rename_file fname next_meta; next_meta)
+  | Regenerate ->
     let rec read () =
       Format.fprintf fmt "Rename? [y/n]: %!";
-      match read_line () with
-        "y" -> rename_file fname next_meta; next_meta
-      | "n" -> next_meta
+      match get1char () with
+        'y' -> rename_file fname next_meta; next_meta
+      | 'n' -> next_meta
       | _ -> read ()
     in
     read ()
+  | Keep -> next_meta
 
 type file =
     Dir of string * file list
@@ -259,13 +282,31 @@ let rec scan_dir f =
   else
     File f
 
+let increase_season = function
+    S i -> S (i+1)
+  | s -> s
+
 let main_loop meta f =
   let files = scan_dir f in
+  let root = ref true in
   let rec loop meta = function
       File f -> rename Format.std_formatter meta f
     | Dir (d, fs) ->
-      Format.printf "==========\nIn subdirectory %s.\n==========\n%!" d;
-      List.fold_left loop meta fs
+      Term.printf [Term.Bold] "==========\nIn subdirectory %s (:%b).\n==========\n%!"
+        d !root;
+      if not !root then
+        begin
+          Format.printf "Increase season and reset episode? [y/n]\n%!";
+          let meta = match get1char () with
+              'y' -> { meta with episode = increase_season @@ fst meta.episode, E 0 }
+            | 'n' -> meta
+            | opt -> Term.printf [Term.Foreground Term.Red]
+                     "Unknown option %c, regenerating.\n%!" opt;
+              regenerate_meta Format.std_formatter meta in
+          List.fold_left loop meta fs
+        end
+      else
+        (root := false; List.fold_left loop meta fs)
   in
   loop meta files
 

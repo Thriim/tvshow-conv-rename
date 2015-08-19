@@ -1,3 +1,4 @@
 begin program "tvshow-rename"
     files = [ "rename.ml" ]
+        requires = [ "ANSITerminal" "unix" ]
 end
